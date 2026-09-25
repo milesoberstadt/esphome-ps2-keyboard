@@ -2,6 +2,7 @@ from esphome import automation, pins
 import esphome.codegen as cg
 from esphome.components import binary_sensor
 import esphome.config_validation as cv
+import esphome.final_validate as fv
 from esphome.const import (
     CONF_BYTES,
     CONF_CLK_PIN,
@@ -10,6 +11,7 @@ from esphome.const import (
     CONF_ID,
     CONF_INVERTED,
     CONF_KEY,
+    CONF_NUMBER,
     CONF_TEXT,
     CONF_TRIGGER_ID,
 )
@@ -65,16 +67,53 @@ def validate_key(value):
     value = cv.string_strict(value)
     if not value.strip():
         raise cv.Invalid("key must not be empty")
+    if len(value.encode("utf-8")) > 64:
+        raise cv.Invalid("key cannot contain more than 64 bytes")
     return value
 
 
+def _combination_tokens(combined):
+    # Mirror the C++ parser rather than counting '+' characters. A physical
+    # plus key is represented by a terminal "++", and it is still one key.
+    normalized = combined.strip()
+    if not normalized:
+        return None
+    if normalized == "+":
+        return ["+"]
+    if normalized.endswith("++"):
+        body = normalized[:-2]
+        if not body:
+            return None
+        tokens = body.split("+") + ["+"]
+    else:
+        tokens = normalized.split("+")
+    if any(not token.strip() for token in tokens):
+        return None
+    return [token.strip() for token in tokens]
+
+
 def validate_keys(value):
-    keys = [validate_key(item) for item in value] if isinstance(value, list) else [validate_key(value)]
+    if isinstance(value, list):
+        keys = [validate_key(item) for item in value]
+    else:
+        keys = [cv.string_strict(value)]
+        if not keys[0].strip():
+            raise cv.Invalid("key must not be empty")
+        if len(keys[0].encode("utf-8")) > 1024:
+            raise cv.Invalid("a combination cannot contain more than 1024 bytes")
     if not keys:
         raise cv.Invalid("keys must contain at least one key")
-    if len(keys) > 32 or "+".join(keys).count("+") >= 32:
+    combined = "+".join(keys)
+    tokens = _combination_tokens(combined)
+    if tokens is None:
+        raise cv.Invalid("keys must contain at least one valid key")
+    if any(len(token.encode("utf-8")) > 64 for token in tokens):
+        raise cv.Invalid("key cannot contain more than 64 bytes")
+    if len(keys) > 32 or len(tokens) > 32:
         raise cv.Invalid("a combination cannot contain more than 32 keys")
-    return "+".join(keys)
+    if len(combined.encode("utf-8")) > 1024:
+        raise cv.Invalid("a combination cannot contain more than 1024 bytes")
+    return combined
 
 
 def validate_text(value):
@@ -102,6 +141,8 @@ def validate_service_prefix(value):
     value = cv.string_strict(value)
     if not value or not value.isascii() or not all(char.isalnum() or char == "_" for char in value):
         raise cv.Invalid("service_prefix must contain only ASCII letters, digits, and underscores")
+    if len(value) > 32:
+        raise cv.Invalid("service_prefix cannot contain more than 32 characters")
     if value[0].isdigit():
         raise cv.Invalid("service_prefix must start with a letter or underscore")
     return value
@@ -118,6 +159,13 @@ def validate_ps2_pin(value):
         raise cv.Invalid("PS/2 pins cannot use inverted: true")
     return value
 
+
+def validate_ps2_pin_pair(config):
+    if config[CONF_CLK_PIN].get(CONF_NUMBER) == config[CONF_DATA_PIN].get(CONF_NUMBER):
+        raise cv.Invalid("clk_pin and data_pin must be different GPIOs")
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
@@ -125,7 +173,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_CLK_PIN): validate_ps2_pin,
             cv.Required(CONF_DATA_PIN): validate_ps2_pin,
             cv.Optional(CONF_TASK_PRIORITY, default=10): cv.int_range(min=1, max=24),
-            cv.Optional(CONF_TASK_CORE, default=-1): cv.int_range(min=-1, max=1),
+            cv.Optional(CONF_TASK_CORE, default=-1): cv.int_range(min=-1, max=7),
             cv.Optional(CONF_SERVICE_PREFIX, default="ps2"): validate_service_prefix,
             cv.Optional(CONF_CAPS_LOCK): binary_sensor.binary_sensor_schema(),
             cv.Optional(CONF_NUM_LOCK): binary_sensor.binary_sensor_schema(),
@@ -142,8 +190,30 @@ CONFIG_SCHEMA = cv.All(
             ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
+    validate_ps2_pin_pair,
     cv.only_on_esp32,
 )
+
+
+def validate_service_prefixes(config):
+    # MULTI_CONF final validation is run once per entry. Inspect the complete
+    # validated root config so duplicate prefixes are detected across entries.
+    root_config = fv.full_config.get()
+    entries = root_config.get("ps2_keyboard", config)
+    entries = entries if isinstance(entries, list) else [entries]
+    prefixes = [entry.get(CONF_SERVICE_PREFIX, "ps2") for entry in entries]
+    if len(prefixes) != len(set(prefixes)):
+        raise cv.Invalid("service_prefix must be unique for each ps2_keyboard instance")
+
+    pin_numbers = []
+    for entry in entries:
+        pin_numbers.append(entry[CONF_CLK_PIN].get(CONF_NUMBER))
+        pin_numbers.append(entry[CONF_DATA_PIN].get(CONF_NUMBER))
+    if len(pin_numbers) != len(set(pin_numbers)):
+        raise cv.Invalid("CLK and DATA pins must not be shared by multiple ps2_keyboard instances")
+
+
+FINAL_VALIDATE_SCHEMA = validate_service_prefixes
 
 
 async def to_code(config):

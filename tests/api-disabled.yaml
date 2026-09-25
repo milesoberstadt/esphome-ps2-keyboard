@@ -1,0 +1,18 @@
+esphome:
+  name: ps2-keyboard-api-disabled-test
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+logger:
+
+ps2_keyboard:
+  clk_pin: GPIO4
+  data_pin: GPIO5

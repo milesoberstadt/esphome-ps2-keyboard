@@ -1,0 +1,18 @@
+esphome:
+  name: ps2-dup-prefix-test
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+ps2_keyboard:
+  - clk_pin: GPIO4
+    data_pin: GPIO5
+  - clk_pin: GPIO6
+    data_pin: GPIO7

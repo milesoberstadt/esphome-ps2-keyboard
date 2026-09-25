@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -218,6 +219,16 @@ inline const KeyEntry *find_key_entry(Key key) {
   return nullptr;
 }
 
+// The one-byte make codes used by the PS/2 FB/FC/FD per-key parameter lists
+// are Set-3 codes. The conventional 122-key/IBM-terminal space is 0x01..0x7E;
+// common extended implementations add 0x83..0x87 and 0x8B..0x8D. 0x80 is a
+// vendor prefix (for example G80-2551), not a standalone make code, and
+// 0x7F/0x81/0x82/0x88..0x8A are not part of this table.
+inline bool is_set3_make_code(uint8_t value) {
+  return (value >= 0x01 && value <= 0x7E) || (value >= 0x83 && value <= 0x87) ||
+         (value >= 0x8B && value <= 0x8D);
+}
+
 inline bool get_make_code(Key key, uint8_t *out_data, uint8_t &out_len) {
   out_len = 0;
   const KeyEntry *entry = find_key_entry(key);
@@ -311,6 +322,8 @@ inline std::string trim_and_upper(const std::string &str) {
 }
 
 inline Key key_from_string(const std::string &raw_str) {
+  if (raw_str.size() > 64)
+    return Key::KEY_NONE;
   std::string s = trim_and_upper(raw_str);
   if (s.empty()) return Key::KEY_NONE;
 
@@ -409,7 +422,7 @@ inline Key key_from_string(const std::string &raw_str) {
   if (s == "KP8" || s == "KP_8") return Key::KEY_KP8;
   if (s == "KP9" || s == "KP_9") return Key::KEY_KP9;
   if (s == "KP_ENTER") return Key::KEY_KP_ENTER;
-  if (s == "KP_PLUS" || s == "KP_+") return Key::KEY_KP_PLUS;
+  if (s == "KP_PLUS") return Key::KEY_KP_PLUS;
   if (s == "KP_MINUS" || s == "KP_-") return Key::KEY_KP_MINUS;
   if (s == "KP_MULTIPLY" || s == "KP_*") return Key::KEY_KP_MULTIPLY;
   if (s == "KP_DIVIDE" || s == "KP_/") return Key::KEY_KP_DIVIDE;
@@ -428,6 +441,25 @@ inline Key key_from_string(const std::string &raw_str) {
   if (s == "WAKE") return Key::KEY_WAKE;
 
   return Key::KEY_NONE;
+}
+
+struct KeyCombinationPart {
+  Key key{Key::KEY_NONE};
+  bool shift{false};
+};
+
+inline bool key_from_string_with_shift(const std::string &raw_str, Key &key, bool &shift) {
+  shift = false;
+  if (raw_str.size() > 64)
+    return false;
+  const std::string normalized = trim_and_upper(raw_str);
+  if (normalized == "+" || normalized == "PLUS") {
+    key = Key::KEY_EQUALS;
+    shift = true;
+    return true;
+  }
+  key = key_from_string(raw_str);
+  return key != Key::KEY_NONE;
 }
 
 inline bool ascii_to_key(char c, Key &key, bool &shift) {
@@ -494,8 +526,10 @@ inline bool ascii_to_key(char c, Key &key, bool &shift) {
   }
 }
 
-inline bool parse_key_combination(const std::string &str, std::vector<Key> &result) {
+inline bool parse_key_combination_with_shift(const std::string &str, std::vector<KeyCombinationPart> &result) {
   result.clear();
+  if (str.size() > 1024)
+    return false;
   const std::string normalized = trim_and_upper(str);
   if (normalized.empty())
     return false;
@@ -504,28 +538,44 @@ inline bool parse_key_combination(const std::string &str, std::vector<Key> &resu
   while (start <= normalized.size()) {
     const size_t separator = normalized.find('+', start);
     const size_t length = (separator == std::string::npos ? normalized.size() : separator) - start;
-    std::string token = normalized.substr(start, length);
+    const std::string token = normalized.substr(start, length);
 
     // A plus sign is also the name of the physical US-layout key. A terminal
     // separator (for example "CTRL++") therefore represents CTRL plus '+'.
     if (token.empty()) {
-      if (separator != normalized.size() - 1)
+      if (separator != normalized.size() - 1 || result.size() >= 32) {
+        result.clear();
         return false;
-      result.push_back(Key::KEY_EQUALS);
+      }
+      result.push_back(KeyCombinationPart{Key::KEY_EQUALS, true});
       return true;
     }
 
-    const Key key = key_from_string(token);
-    if (key == Key::KEY_NONE) {
+    Key key = Key::KEY_NONE;
+    bool shift = false;
+    if (!key_from_string_with_shift(token, key, shift) || result.size() >= 32) {
       result.clear();
       return false;
     }
-    result.push_back(key);
+    result.push_back(KeyCombinationPart{key, shift});
 
     if (separator == std::string::npos)
       break;
     start = separator + 1;
   }
+  return true;
+}
+
+inline bool parse_key_combination(const std::string &str, std::vector<Key> &result) {
+  std::vector<KeyCombinationPart> parts;
+  if (!parse_key_combination_with_shift(str, parts)) {
+    result.clear();
+    return false;
+  }
+  result.clear();
+  result.reserve(parts.size());
+  for (const KeyCombinationPart &part : parts)
+    result.push_back(part.key);
   return true;
 }
 
@@ -535,6 +585,9 @@ inline std::vector<Key> parse_key_combination(const std::string &str) {
   parse_key_combination(str, result);
   return result;
 }
+
+static constexpr size_t MAX_HEX_TOKEN_BYTES = 32;
+static constexpr size_t MAX_HEX_INPUT_CHARS = 32 * 1024;
 
 inline int hex_digit_value(char c) {
   if (c >= '0' && c <= '9')
@@ -547,6 +600,8 @@ inline int hex_digit_value(char c) {
 }
 
 inline bool parse_hex_token(const std::string &token, uint8_t &value) {
+  if (token.size() > MAX_HEX_TOKEN_BYTES)
+    return false;
   size_t start = 0;
   if (token.size() >= 2 && token[0] == '0' && (token[1] == 'x' || token[1] == 'X'))
     start = 2;
@@ -556,24 +611,26 @@ inline bool parse_hex_token(const std::string &token, uint8_t &value) {
   unsigned int parsed = 0;
   for (size_t i = start; i < token.size(); i++) {
     const int digit = hex_digit_value(token[i]);
-    if (digit < 0)
+    if (digit < 0 || parsed > 0x0F)
       return false;
     parsed = (parsed << 4) | static_cast<unsigned int>(digit);
-    if (parsed > 0xFF)
-      return false;
   }
   value = static_cast<uint8_t>(parsed);
   return true;
 }
 
-inline std::vector<uint8_t> parse_hex_string(const std::string &hex_str) {
+inline std::vector<uint8_t> parse_hex_string(const std::string &hex_str,
+                                           size_t max_bytes = std::numeric_limits<size_t>::max(),
+                                           size_t max_input_chars = std::numeric_limits<size_t>::max()) {
+  if (hex_str.size() > max_input_chars)
+    return {};
   std::vector<uint8_t> result;
   std::string token;
   auto flush_token = [&]() {
     if (token.empty())
       return true;
     uint8_t value;
-    if (!parse_hex_token(token, value))
+    if (!parse_hex_token(token, value) || result.size() >= max_bytes)
       return false;
     result.push_back(value);
     token.clear();
@@ -585,6 +642,8 @@ inline std::vector<uint8_t> parse_hex_string(const std::string &hex_str) {
       if (!flush_token())
         return {};
     } else {
+      if (token.size() >= MAX_HEX_TOKEN_BYTES)
+        return {};
       token += c;
     }
   }

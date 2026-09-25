@@ -1,0 +1,20 @@
+esphome:
+  name: ps2-shared-pin-test
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+ps2_keyboard:
+  - clk_pin: GPIO4
+    data_pin: GPIO5
+    service_prefix: first
+  - clk_pin: GPIO4
+    data_pin: GPIO6
+    service_prefix: second

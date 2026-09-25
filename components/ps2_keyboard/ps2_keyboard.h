@@ -15,6 +15,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 #include <atomic>
@@ -26,12 +27,7 @@
 namespace esphome {
 namespace ps2_keyboard {
 
-struct PS2Packet {
-  uint8_t len{0};
-  uint8_t data[16]{0};
-  uint32_t delay_after_ms{10};
-};
-
+struct PS2Transaction;
 struct PS2Job;
 
 class PS2Keyboard : public Component
@@ -64,6 +60,8 @@ class PS2Keyboard : public Component
   void setup() override;
   void loop() override;
   void dump_config() override;
+  void on_shutdown() override;
+  bool teardown() override;
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
   // High-level public keyboard actions
@@ -88,43 +86,63 @@ class PS2Keyboard : public Component
   void ha_send_raw(std::string hex_bytes);
 #endif
 
-  // Bus driver methods
-  bool write_byte(uint8_t data);
-  bool write_byte_wait_idle(uint8_t data, uint32_t timeout_us = 15000);
-  bool read_byte(uint8_t *result, uint32_t timeout_us = 50000);
+ protected:
+  // Bus driver methods and task entry points are intentionally not part of
+  // the public component API; the dedicated task serializes all bus access.
+  bool write_byte(uint8_t data, bool *frame_started = nullptr);
+  bool write_byte_wait_idle(uint8_t data, uint32_t timeout_us = 15000, bool *frame_started = nullptr);
+  bool read_byte(uint8_t *result, uint32_t timeout_us = 50000, bool *aborted = nullptr,
+                 bool *invalid = nullptr);
+  bool read_host_argument(uint8_t *result);
   bool send_ack();
   bool handle_host_command(uint8_t cmd);
 
-  // Background task entry point
   static void task_fn(void *arg);
   void run_task();
 
- protected:
   InternalGPIOPin *clk_pin_{nullptr};
   InternalGPIOPin *data_pin_{nullptr};
   ISRInternalGPIOPin isr_clk_{};
   ISRInternalGPIOPin isr_data_{};
 
-  enum class ByteSendResult : uint8_t { SENT, ABORTED, TIMED_OUT };
+  enum class ByteSendResult : uint8_t { SENT, INTERRUPTED, ABORTED, TIMED_OUT };
+  enum class HostCommandResult : uint8_t { COMPLETE, COMPLETE_RESPONSE_FAILED, REPLACE };
 
   bool bus_idle();
   bool host_request_pending();
-  bool enqueue_job(std::vector<PS2Packet> &&packets);
-  void drop_pending_jobs();
+  void press_key_with_shift(Key key, bool shift);
+  void release_key_with_shift(Key key, bool shift);
+  void stroke_key_with_shift(Key key, bool shift, uint32_t delay_ms);
+  void press_combination(const std::vector<KeyCombinationPart> &keys, uint32_t hold_delay_ms);
+  size_t reserve_output_memory(size_t data_bytes, size_t packet_count);
+  void release_output_memory(size_t reservation);
+  bool enqueue_job(PS2Transaction &&transaction, size_t reservation);
+  void enter_bus_fault();
+  void drop_pending_jobs_locked();
+  void cleanup_runtime_resources();
   void invalidate_output_jobs();
   bool handle_host_request();
+  HostCommandResult handle_host_command_impl(uint8_t cmd, uint8_t *replacement);
   bool delay_ms_interruptible(uint32_t delay_ms);
   bool write_response_byte(uint8_t data);
-  void send_resend_request();
-  ByteSendResult send_queued_byte(uint8_t data);
+  bool write_response_bytes(const uint8_t *data, size_t length);
+  bool send_resend_request();
+  ByteSendResult send_queued_byte(uint8_t data, bool *frame_started = nullptr);
   void process_job(PS2Job *job);
+  // Destroys the job and releases its exact allocation charge.
+  void release_job_memory(PS2Job *job);
   void set_led_state(bool caps, bool num, bool scroll);
+  void reset_device_defaults();
   void reset_device_state();
 
   QueueHandle_t job_queue_{nullptr};
+  SemaphoreHandle_t queue_mutex_{nullptr};
+  SemaphoreHandle_t task_exit_semaphore_{nullptr};
   TaskHandle_t task_handle_{nullptr};
+  std::atomic<bool> shutdown_requested_{false};
   uint8_t task_priority_{10};
   int8_t task_core_{-1};
+  uint32_t initial_bat_delay_ms_{0};
   std::string service_prefix_{"ps2"};
 
 #ifdef USE_BINARY_SENSOR
@@ -142,8 +160,10 @@ class PS2Keyboard : public Component
   std::atomic<bool> host_reset_detected_{false};
   std::atomic<bool> reporting_enabled_{true};
   std::atomic<bool> reset_in_progress_{false};
+  std::atomic<bool> host_command_in_progress_{false};
   std::atomic<uint32_t> output_generation_{0};
-  std::atomic<uint8_t> last_sent_byte_{0xAA};
+  std::atomic<bool> bus_faulted_{false};
+  std::atomic<uint8_t> last_data_byte_{0xAA};
 };
 
 }  // namespace ps2_keyboard

@@ -6,7 +6,8 @@ CXX_BIN="${CXX:-c++}"
 TMP_ROOT="${TMPDIR:-/tmp/opencode}"
 mkdir -p "$TMP_ROOT"
 TEST_BIN="$(mktemp "$TMP_ROOT/ps2-scancodes.XXXXXX")"
-trap 'rm -f "$TEST_BIN"' EXIT
+TRANSACTION_TEST_BIN="$(mktemp "$TMP_ROOT/ps2-transactions.XXXXXX")"
+trap 'rm -f "$TEST_BIN" "$TRANSACTION_TEST_BIN"' EXIT
 
 "$CXX_BIN" \
   -std=c++17 \
@@ -18,10 +19,23 @@ trap 'rm -f "$TEST_BIN"' EXIT
   -o "$TEST_BIN"
 "$TEST_BIN"
 
-python3 -m compileall -q "$ROOT_DIR/components/ps2_keyboard"
+"$CXX_BIN" \
+  -std=c++17 \
+  -Wall \
+  -Wextra \
+  -Werror \
+  -I"$ROOT_DIR/components" \
+  "$ROOT_DIR/tests/transaction_test.cpp" \
+  -o "$TRANSACTION_TEST_BIN"
+"$TRANSACTION_TEST_BIN"
+
+python3 -m compileall -q "$ROOT_DIR/components/ps2_keyboard" "$ROOT_DIR/tests/schema_test.py"
+python3 "$ROOT_DIR/tests/schema_test.py"
 (
   cd "$ROOT_DIR"
   esphome config example.yaml >/dev/null
+  esphome config tests/api-disabled.yaml >/dev/null
+  esphome config tests/multi-instance.yaml >/dev/null
   INVALID_LOG="$TMP_ROOT/ps2-invalid-pin.log"
   if esphome config tests/invalid-inverted-pin.yaml >"$INVALID_LOG" 2>&1; then
     echo "inverted PS/2 pin was accepted" >&2
@@ -30,6 +44,39 @@ python3 -m compileall -q "$ROOT_DIR/components/ps2_keyboard"
   if ! grep -q "cannot use inverted" "$INVALID_LOG"; then
     cat "$INVALID_LOG" >&2
     echo "invalid-pin fixture failed for an unexpected reason" >&2
+    exit 1
+  fi
+
+  SAME_PIN_LOG="$TMP_ROOT/ps2-same-pin.log"
+  if esphome config tests/same-pin.yaml >"$SAME_PIN_LOG" 2>&1; then
+    echo "matching PS/2 clock and data pins were accepted" >&2
+    exit 1
+  fi
+  if ! grep -q "must be different" "$SAME_PIN_LOG"; then
+    cat "$SAME_PIN_LOG" >&2
+    echo "same-pin fixture failed for an unexpected reason" >&2
+    exit 1
+  fi
+
+  DUPLICATE_PREFIX_LOG="$TMP_ROOT/ps2-duplicate-prefix.log"
+  if esphome config tests/duplicate-service-prefix.yaml >"$DUPLICATE_PREFIX_LOG" 2>&1; then
+    echo "duplicate PS/2 service prefixes were accepted" >&2
+    exit 1
+  fi
+  if ! grep -q "service_prefix must be unique" "$DUPLICATE_PREFIX_LOG"; then
+    cat "$DUPLICATE_PREFIX_LOG" >&2
+    echo "duplicate-prefix fixture failed for an unexpected reason" >&2
+    exit 1
+  fi
+
+  SHARED_PIN_LOG="$TMP_ROOT/ps2-shared-pin.log"
+  if esphome config tests/shared-pin.yaml >"$SHARED_PIN_LOG" 2>&1; then
+    echo "PS/2 pins shared by multiple instances were accepted" >&2
+    exit 1
+  fi
+  if ! grep -q "must not be shared" "$SHARED_PIN_LOG"; then
+    cat "$SHARED_PIN_LOG" >&2
+    echo "shared-pin fixture failed for an unexpected reason" >&2
     exit 1
   fi
 )

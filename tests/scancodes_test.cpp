@@ -62,7 +62,23 @@ int main() {
   expect(key_from_string("LEFTBRACKET") == Key::KEY_LEFTBRACKET, "long punctuation key name");
   expect(key_from_string("PAGE_UP") == Key::KEY_PAGE_UP, "navigation key name");
   expect(key_from_string("+") == Key::KEY_EQUALS, "physical plus key");
+  Key parsed_key = Key::KEY_NONE;
+  bool parsed_shift = false;
+  expect(key_from_string_with_shift("+", parsed_key, parsed_shift) && parsed_key == Key::KEY_EQUALS && parsed_shift,
+         "physical plus key carries Shift for key actions");
+  expect(key_from_string_with_shift("PLUS", parsed_key, parsed_shift) && parsed_key == Key::KEY_EQUALS && parsed_shift,
+         "PLUS alias carries Shift for key actions");
   expect(key_from_string("NOT_A_KEY") == Key::KEY_NONE, "unknown key is rejected");
+  expect(key_from_string(std::string(65, 'A')) == Key::KEY_NONE, "overlong key names are rejected");
+
+  expect(is_set3_make_code(0x01) && is_set3_make_code(0x02) && is_set3_make_code(0x7E),
+         "Set-3 conventional make codes should be accepted permissively");
+  expect(is_set3_make_code(0x83) && is_set3_make_code(0x87), "Set-3 extended 0x83..0x87 codes should be accepted");
+  expect(is_set3_make_code(0x8B) && is_set3_make_code(0x8C) && is_set3_make_code(0x8D),
+         "Set-3 GUI/application codes should be accepted");
+  for (uint8_t invalid : {0x00, 0x7F, 0x80, 0x81, 0x82, 0x88, 0x89, 0x8A, 0x8E, 0xFF}) {
+    expect(!is_set3_make_code(invalid), "reserved or non-Set-3 make code should be rejected");
+  }
 
   for (unsigned char c = 0x20; c <= 0x7E; c++) {
     Key key = Key::KEY_NONE;
@@ -85,14 +101,47 @@ int main() {
          "minus can be a combination key");
   expect(parse_key_combination("CTRL++", combination) && combination.size() == 2 && combination[1] == Key::KEY_EQUALS,
          "terminal plus represents the plus key");
+  std::vector<KeyCombinationPart> shifted_combination;
+  expect(parse_key_combination_with_shift("CTRL++", shifted_combination) && shifted_combination.size() == 2 &&
+             shifted_combination[1].key == Key::KEY_EQUALS && shifted_combination[1].shift,
+         "terminal plus retains Shift in parsed combination actions");
   expect(!parse_key_combination("CTRL+NOT_A_KEY", combination), "invalid combination is rejected");
   expect(combination.empty(), "invalid combination is all-or-nothing");
+  expect(!parse_key_combination("CTRL+", combination), "a single trailing separator is rejected");
+  expect(combination.empty(), "invalid combination is all-or-nothing");
+  std::string overlong_combination;
+  for (int i = 0; i < 33; i++) {
+    if (i != 0)
+      overlong_combination += '+';
+    overlong_combination += 'A';
+  }
+  expect(!parse_key_combination(overlong_combination, combination), "combinations are limited to 32 keys");
+  expect(combination.empty(), "overlong combination is all-or-nothing");
 
-  expect_bytes(parse_hex_string("E0,75 0x1C;FF"), {0xE0, 0x75, 0x1C, 0xFF}, "valid raw bytes parse");
+  expect_bytes(parse_hex_string("E0,75 0x1C;0xff;FF"), {0xE0, 0x75, 0x1C, 0xFF, 0xFF},
+               "valid raw bytes parse with delimiters and prefix case");
   expect(parse_hex_string("GG").empty(), "non-hex raw token is rejected");
   expect(parse_hex_string("1G").empty(), "partially valid raw token is rejected");
   expect(parse_hex_string("100").empty(), "raw byte overflow is rejected");
   expect(parse_hex_string("0x").empty(), "empty prefixed raw token is rejected");
+  expect_bytes(parse_hex_string(std::string(32, '0')), {0x00}, "32-character zero-padded raw token is accepted");
+  expect(parse_hex_string(std::string(32, '1')).empty(), "large raw token must not overflow silently");
+  expect(parse_hex_string(std::string(33, '0')).empty(), "overlong raw token is rejected");
+  expect(parse_hex_string("00 01 02", 2).empty(), "raw parser enforces its output limit");
+  expect_bytes(parse_hex_string("FF, FF;", 2), {0xFF, 0xFF}, "raw parser ignores empty delimiters");
+
+  const size_t max_raw_bytes = 4096;
+  std::string max_raw_input;
+  max_raw_input.reserve(max_raw_bytes * 3);
+  for (size_t i = 0; i < max_raw_bytes; i++)
+    max_raw_input += "FF ";
+  expect(max_raw_input.size() <= MAX_HEX_INPUT_CHARS, "maximum raw HA input should fit the input limit");
+  expect(parse_hex_string(max_raw_input, max_raw_bytes, max_raw_input.size()).size() == max_raw_bytes,
+         "raw parser accepts input at its character limit");
+  expect(parse_hex_string(max_raw_input, max_raw_bytes, max_raw_input.size() - 1).empty(),
+         "raw parser rejects input over its character limit");
+  expect(parse_hex_string(" \t\r\n,;", max_raw_bytes, MAX_HEX_INPUT_CHARS).empty(),
+         "empty raw input is rejected by the action path");
 
   std::cout << "scancodes_test: all checks passed\n";
   return 0;
