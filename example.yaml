@@ -1,0 +1,113 @@
+substitutions:
+  name: esphome-ps2-keyboard
+  friendly_name: "PS/2 Keyboard Emulator"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    # Supports both 'esp-idf' and 'arduino'
+    type: esp-idf
+
+# Load the local external component
+external_components:
+  - source:
+      type: local
+      path: components
+
+# Enable Home Assistant native API and services
+api:
+  encryption:
+    key: "HmLlD855vPwJWw7ZjYN4hm0703BaMDsvGjZwci3229g="
+
+# Enable OTA updates
+ota:
+  - platform: esphome
+
+# WiFi configuration
+wifi:
+  ssid: "YOUR_WIFI_SSID"
+  password: "YOUR_WIFI_PASSWORD"
+  ap:
+    ssid: "PS2-Keyboard-Fallback"
+    password: "fallbackpassword"
+
+captive_portal:
+
+# Logger configuration
+logger:
+  level: DEBUG
+
+# PS/2 Keyboard Component Configuration
+ps2_keyboard:
+  id: my_ps2_keyboard
+  # Specify GPIO pins for Clock and Data lines (e.g., GPIO4 and GPIO5)
+  clk_pin: GPIO4
+  data_pin: GPIO5
+
+  # Background FreeRTOS task priority (default: 10) and core affinity (default: 1)
+  task_priority: 10
+  task_core: 1
+
+  # Optional Binary Sensors to reflect Host keyboard LED indicators
+  caps_lock:
+    name: "${friendly_name} Caps Lock"
+    icon: "mdi:keyboard-caps"
+  num_lock:
+    name: "${friendly_name} Num Lock"
+    icon: "mdi:keyboard"
+  scroll_lock:
+    name: "${friendly_name} Scroll Lock"
+    icon: "mdi:keyboard-outline"
+
+  # Optional automations triggered on host events
+  on_led_change:
+    - lambda: |-
+        ESP_LOGI("ps2", "Host updated LEDs -> Caps: %s, Num: %s, Scroll: %s",
+                 caps ? "ON" : "OFF", num ? "ON" : "OFF", scroll ? "ON" : "OFF");
+
+  on_host_reset:
+    - lambda: |-
+        ESP_LOGI("ps2", "Host reset detected (PC boot / reboot)!");
+
+# Example entities demonstrating ESPHome automation actions
+button:
+  - platform: template
+    name: "${friendly_name} Type Hello World"
+    icon: "mdi:text"
+    on_press:
+      - ps2_keyboard.print:
+          text: "Hello from ESPHome PS/2 Keyboard!\n"
+
+  - platform: template
+    name: "${friendly_name} Press Enter"
+    icon: "mdi:keyboard-return"
+    on_press:
+      - ps2_keyboard.stroke:
+          key: "ENTER"
+
+  - platform: template
+    name: "${friendly_name} Ctrl+Alt+Delete"
+    icon: "mdi:keyboard-variant"
+    on_press:
+      - ps2_keyboard.combination:
+          keys: ["CTRL", "ALT", "DELETE"]
+
+  - platform: template
+    name: "${friendly_name} Win+R (Run Dialog)"
+    icon: "mdi:microsoft-windows"
+    on_press:
+      - ps2_keyboard.combination:
+          keys: "WIN+R"
+      - delay: 500ms
+      - ps2_keyboard.print: "cmd.exe\n"
+
+  - platform: template
+    name: "${friendly_name} Send Raw Scancode (A Key)"
+    icon: "mdi:matrix"
+    on_press:
+      - ps2_keyboard.send_raw:
+          bytes: [0x1C, 0xF0, 0x1C]
