@@ -1,0 +1,18 @@
+esphome:
+  name: ps2-invalid-pin-test
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+ps2_keyboard:
+  clk_pin:
+    number: GPIO4
+    inverted: true
+  data_pin: GPIO5

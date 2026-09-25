@@ -1,0 +1,31 @@
+esphome:
+  name: ps2-keyboard-arduino-test
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+logger:
+
+ps2_keyboard:
+  clk_pin: GPIO4
+  data_pin: GPIO5
+  on_led_change:
+    - ps2_keyboard.print:
+        text: "compile-check"
+    - ps2_keyboard.stroke:
+        key: ENTER
+    - ps2_keyboard.press:
+        key: LSHIFT
+    - ps2_keyboard.release:
+        key: LSHIFT
+    - ps2_keyboard.combination:
+        keys: CTRL+ALT+DELETE
+    - ps2_keyboard.send_raw:
+        bytes: [0x1C, 0xF0, 0x1C]

@@ -1,223 +1,282 @@
-# ESPHome PS/2 Keyboard Component for ESP32-S3
+# ESPHome PS/2 Keyboard component
 
-A custom ESPHome external component that emulates a hardware **PS/2 Keyboard** using GPIO pins on an **ESP32-S3** (and other ESP32 family chips). It allows you to send keystrokes, key combinations, arbitrary scan codes, and text strings to any computer, BIOS, server, KVM switch, or retro PC with a PS/2 port, directly from ESPHome automations or Home Assistant.
+An external [ESPHome](https://esphome.io/) component that exposes an ESP32 GPIO pair as a PS/2 keyboard. It can type text, send key strokes and combinations, and transmit arbitrary Scan Code Set 2 byte sequences to a host, BIOS, KVM, or vintage computer.
 
----
+The implementation targets the ESP32-S3 and uses ESP-IDF or Arduino. It is build-tested with ESPHome 2026.9.0; electrical and host compatibility still needs to be verified with the intended hardware.
 
 ## Features
 
-- **Standard PS/2 Protocol Emulation (Scan Code Set 2)**: Fully implements device-to-host and host-to-device communication.
-- **Full Host Command Handling**:
-  - Handles `0xFF` (Reset / BAT test) with `0xAA` pass response.
-  - Handles `0xF2` (Read Device ID) identifying as a standard keyboard (`0xAB, 0x83`).
-  - Handles `0xED` (Set Status Indicators / LEDs) for Caps Lock, Num Lock, and Scroll Lock.
-  - Handles `0xEE` (Echo), `0xF4` (Enable), `0xF5` (Disable), `0xF6` (Defaults), `0xFE` (Resend), and `0xF0` (Scan Code Set).
-- **Dual Framework Support**: Tested and verified on both `esp-idf` and `arduino` frameworks.
-- **Non-blocking FreeRTOS Background Task**: All timing-critical PS/2 clocking and host RTS monitoring runs in a dedicated FreeRTOS background task with a message queue. Your ESPHome loop, WiFi, and Home Assistant API never freeze.
-- **Home Assistant Native API Services**: Automatically registers user services in Home Assistant (`ps2_type`, `ps2_stroke`, `ps2_press`, `ps2_release`, `ps2_combination`, `ps2_send_raw`).
-- **Binary Sensors & Triggers**:
-  - Exposes `caps_lock`, `num_lock`, and `scroll_lock` binary sensors.
-  - Automations via `on_led_change` and `on_host_reset` triggers.
-- **Rich Keystroke & Hotkey Support**:
-  - ASCII text typing with automatic Shift key management.
-  - Key combinations (e.g. `Ctrl+Alt+Del`, `Win+R`, `Alt+F4`) with reverse-order release.
-  - Raw scan code transmission.
+- Scan Code Set 2 device-to-host and host-to-device framing with odd parity.
+- Non-blocking output from ESPHome automations and Home Assistant actions; a dedicated FreeRTOS task owns the bus.
+- Power-on BAT response (`0xAA`) and host reset handling.
+- Host commands for enable/disable, defaults, LEDs, echo, resend, device ID, typematic parameters, and scan-code-set queries.
+- Caps Lock, Num Lock, and Scroll Lock binary sensors.
+- `on_led_change` and `on_host_reset` automation triggers.
+- US-layout ASCII typing with automatic Shift handling.
+- Key combinations and raw scan-code actions.
+- Optional Home Assistant custom API services.
 
----
+## Supported environment
 
-## Hardware & Wiring
+| Item | Status |
+| --- | --- |
+| ESP32-S3 | Supported target |
+| Other ESP32 variants | Compile-time compatible; verify pin and core support for the board |
+| ESP-IDF | Build-tested with ESPHome 2026.9.0 |
+| Arduino | Build-tested with ESPHome 2026.9.0 |
+| Scan code set | Set 2 |
+| Keyboard layout | US ASCII |
+| Unicode/layout switching | Not implemented |
 
-### PS/2 Mini-DIN 6 Pinout
+This is a keyboard emulator, not a USB keyboard. It cannot enumerate a USB host or replace the host's USB HID stack. Media, power, and extended keys are sent using their Set 2 sequences, but support depends on the receiving BIOS/OS/KVM.
 
-```
+## Hardware and wiring
+
+### Mini-DIN pinout
+
+```text
          ____
        /  __  \
-      /  [__]  \
-     | 5  6  NC |
-     |  3   4   |
-     |   1 2    |
+      |  [__]  |
+     | 5 6  NC |
+     |  3   4  |
+     |   1 2   |
       \________/
-   (Looking at Female Port)
+        Female port
 ```
 
-| Pin # | PS/2 Signal | Description | Connect To |
-|:-----:|:-----------:|:------------|:-----------|
-| **1** | **DATA**    | Bidirectional Data Line | Level Shifter HV1 / ESP32 GPIO |
-| **2** | *NC*        | Not Connected / Reserved | — |
-| **3** | **GND**     | Ground | ESP32 GND & Power Supply GND |
-| **4** | **+5V VCC** | 5V Power from Host (Optional) | 5V Level Shifter HV / 5V In |
-| **5** | **CLK**     | Bidirectional Clock Line | Level Shifter HV2 / ESP32 GPIO |
-| **6** | *NC*        | Not Connected / Reserved | — |
+| Pin | Signal | ESP32 connection |
+| ---: | --- | --- |
+| 1 | DATA | Low-voltage side of a bidirectional level shifter |
+| 2 | NC | Do not connect |
+| 3 | GND | Common ground |
+| 4 | +5 V | Host supply, if used by the level shifter |
+| 5 | CLK | Low-voltage side of a bidirectional level shifter |
+| 6 | NC | Do not connect |
 
-> [!WARNING]
-> **Voltage Level Warning**: Most vintage and modern PC PS/2 ports operate at **5V** and have host-side pull-up resistors to +5V. ESP32-S3 GPIO pins operate at **3.3V**.
-> Connecting 5V directly to ESP32 pins can degrade or damage the chip.
-> **It is strongly recommended to use a 2-channel bidirectional I2C/logic level shifter (such as BSS138-based modules)**:
-> - **LV side**: Powered by ESP32 **3.3V**; LV1 connected to `DATA_PIN`, LV2 connected to `CLK_PIN`.
-> - **HV side**: Powered by Host **5V**; HV1 connected to PS/2 **DATA**, HV2 connected to PS/2 **CLK**.
-> - **GND**: Common ground connected between ESP32 and Host.
+> **Do not connect a 5 V PS/2 signal directly to an ESP32 GPIO.** Use a two-channel bidirectional logic-level shifter (for example, a properly wired BSS138 module), with the low-voltage side powered by 3.3 V and the high-voltage side powered by 5 V. Connect the ground of the shifter, ESP32, and host together. The shifter should have pull-ups on both sides; the component also enables the ESP32-side pull-ups while initializing the pins.
 
----
+The component starts the lines as pulled-up inputs and switches them to bidirectional open-drain GPIO modes during setup. Keep the shifter and wiring short; PS/2 is an old, slow, single-ended bus.
 
-## Installation & Configuration
+## Installation
 
-1. Place the `components/ps2_keyboard` folder in your ESPHome configuration directory:
-   ```text
-   your-esphome-config/
-   ├── components/
-   │   └── ps2_keyboard/
-   │       ├── __init__.py
-   │       ├── automation.h
-   │       ├── binary_sensor.py
-   │       ├── ps2_keyboard.cpp
-   │       ├── ps2_keyboard.h
-   │       └── scancodes.h
-   └── my_keyboard.yaml
-   ```
-
-2. Include the component in your YAML configuration:
+### GitHub external component
 
 ```yaml
-esphome:
-  name: ps2-keyboard-controller
+external_components:
+  - source: github://milesoberstadt/esphome-ps2-keyboard
+    refresh: 1d
+    components: [ps2_keyboard]
+```
 
-esp32:
-  board: esp32-s3-devkitc-1
-  framework:
-    type: esp-idf # or 'arduino'
+Pin a release tag or commit in a production configuration if reproducible updates are important.
 
+### Local checkout
+
+```yaml
 external_components:
   - source:
       type: local
       path: components
+```
 
-api:
-  encryption:
-    key: "YOUR_ENCRYPTION_KEY_HERE"
+Copy the `components/ps2_keyboard` directory into an existing ESPHome external-components directory if that is more convenient.
 
-wifi:
-  ssid: "YOUR_WIFI_SSID"
-  password: "YOUR_WIFI_PASSWORD"
+## Minimal configuration
+
+```yaml
+esphome:
+  name: ps2-keyboard
+  min_version: 2026.9.0
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf  # or arduino
+
+external_components:
+  - source: github://milesoberstadt/esphome-ps2-keyboard
+    components: [ps2_keyboard]
+
+logger:
 
 ps2_keyboard:
   id: ps2_kb
   clk_pin: GPIO4
   data_pin: GPIO5
-
-  # Optional settings
-  task_priority: 10 # FreeRTOS priority (default: 10)
-  task_core: 1      # Core affinity (default: 1, -1 for no affinity)
-
-  # Optional LED status sensors
-  caps_lock:
-    name: "PS/2 Caps Lock"
-  num_lock:
-    name: "PS/2 Num Lock"
-  scroll_lock:
-    name: "PS/2 Scroll Lock"
-
-  # Optional event triggers
-  on_led_change:
-    - lambda: |-
-        ESP_LOGI("ps2", "LEDs: Caps=%d, Num=%d, Scroll=%d", caps, num, scroll);
-  on_host_reset:
-    - lambda: |-
-        ESP_LOGI("ps2", "Host computer booted or reset!");
 ```
 
----
+`task_priority` defaults to `10`; valid values are 1–24. `task_core` defaults to `-1` (no affinity), which is portable across ESP32 variants. Set it to `0` or `1` when a board-specific measurement shows that affinity is useful. If more than one `ps2_keyboard` instance is configured, give each instance a distinct `service_prefix` when custom API services are enabled.
 
-## ESPHome Automation Actions
+### LED entities and triggers
 
-### 1. `ps2_keyboard.print`
-Types out an ASCII string character by character, automatically holding Shift for uppercase and punctuation symbols.
+The LED entities are optional child binary sensors:
+
+```yaml
+ps2_keyboard:
+  id: ps2_kb
+  clk_pin: GPIO4
+  data_pin: GPIO5
+
+  caps_lock:
+    name: PS2 Caps Lock
+  num_lock:
+    name: PS2 Num Lock
+  scroll_lock:
+    name: PS2 Scroll Lock
+
+  on_led_change:
+    - lambda: |-
+        ESP_LOGI("ps2", "LEDs: caps=%d num=%d scroll=%d", caps, num, scroll);
+  on_host_reset:
+    - lambda: |-
+        ESP_LOGI("ps2", "The host sent a keyboard reset command");
+```
+
+`on_host_reset` is triggered by PS/2 command `0xFF`; it is not an electrical detection of every host power cycle.
+
+## ESPHome actions
+
+Actions enqueue a complete output transaction. A transaction is not interleaved with another action submitted at the same time, although the host can still send PS/2 commands while the transaction is in progress.
+
+### Print text
 
 ```yaml
 on_press:
   - ps2_keyboard.print:
       text: "sudo reboot\n"
-      delay: 15ms # Optional delay between characters (default: 10ms)
+      delay: 10ms  # delay between characters
 ```
 
-### 2. `ps2_keyboard.stroke`
-Presses and then releases a single key after a configurable delay.
+`delay` is the inter-character delay. The action returns after queueing the transaction; it does not block the ESPHome loop while the bus is clocked.
+
+### Stroke, press, and release
 
 ```yaml
 on_press:
   - ps2_keyboard.stroke:
-      key: "ENTER"
-      delay: 20ms # Optional keypress duration (default: 10ms)
-```
-
-### 3. `ps2_keyboard.press` & `ps2_keyboard.release`
-Manually hold down and release keys.
-
-```yaml
-on_press:
+      key: ENTER
+      delay: 20ms  # hold time before the break sequence
   - ps2_keyboard.press:
-      key: "LSHIFT"
+      key: LSHIFT
   - ps2_keyboard.stroke:
-      key: "A"
+      key: A
   - ps2_keyboard.release:
-      key: "LSHIFT"
+      key: LSHIFT
 ```
 
-### 4. `ps2_keyboard.combination`
-Presses multiple modifier and action keys sequentially, pauses, and releases them in reverse order. Can take a list or a string.
+`press` and `release` are separate manual transactions, so another action can be queued between them. Use `stroke` for an atomic make/hold/break operation.
+
+### Combinations
 
 ```yaml
-# List syntax:
 on_press:
   - ps2_keyboard.combination:
-      keys: ["CTRL", "ALT", "DELETE"]
-      delay: 50ms # Hold duration before releasing
-
-# String syntax:
-on_press:
-  - ps2_keyboard.combination:
-      keys: "WIN+R"
+      keys: [CTRL, ALT, DELETE]
+      delay: 50ms
 ```
 
-### 5. `ps2_keyboard.send_raw`
-Sends arbitrary hex scan codes directly to the PS/2 bus.
+A string is also accepted:
+
+```yaml
+- ps2_keyboard.combination:
+    keys: WIN+R
+```
+
+The parser is strict: an unknown token rejects the whole combination. `PAGE_UP` is one key, and the physical minus and plus keys can be used (`CTRL+-` and `CTRL++`).
+
+### Raw scan-code bytes
 
 ```yaml
 on_press:
   - ps2_keyboard.send_raw:
-      bytes: [0x1C, 0xF0, 0x1C] # 'A' make and break
+      bytes: [0x1C, 0xF0, 0x1C]  # A make, then A break
 ```
 
----
+The Home Assistant service accepts whitespace-, comma-, or semicolon-separated hexadecimal bytes, for example `E0 75 E0 F0 75`.
 
-## Home Assistant Integration
+## Queue and host-command behavior
 
-When `api:` is configured, the component registers native user services in Home Assistant. You can trigger them from Home Assistant automations, scripts, or **Developer Tools > Actions**:
+- The output queue holds up to 16 complete transactions.
+- Text is limited to 1024 bytes and raw input to 4096 bytes per transaction.
+- A full queue, disabled reporting, or an allocation failure rejects the new action and logs a warning; the ESPHome/API caller is not blocked waiting for bus space.
+- A byte that cannot be sent within 500 ms is retried rather than abandoning a partially transmitted make/break sequence. The task continues servicing host commands and ESPHome remains responsive.
+- Host reset, disable, and set-defaults commands discard pending output transactions so stale keystrokes are not sent after a host state change.
+- Host commands are serviced during inter-byte and hold delays, rather than waiting for a long action delay to finish.
 
-| Service | Parameters | Description | Example |
-|:---|:---|:---|:---|
-| `esphome.<node>_ps2_type` | `text` | Types ASCII text string | `text: "echo 'hello world' > test.txt\n"` |
-| `esphome.<node>_ps2_stroke` | `key` | Presses & releases a key | `key: "F11"` or `key: "ENTER"` |
-| `esphome.<node>_ps2_combination` | `keys` | Presses key combo and releases in reverse order | `keys: "ctrl+alt+del"` or `keys: "win+r"` |
-| `esphome.<node>_ps2_press` | `key` | Holds key down | `key: "LCTRL"` |
-| `esphome.<node>_ps2_release` | `key` | Releases held key | `key: "LCTRL"` |
-| `esphome.<node>_ps2_send_raw` | `hex_bytes` | Sends space/comma-separated hex bytes | `hex_bytes: "E0 75 E0 F0 75"` (Up Arrow) |
+## Home Assistant services
 
----
+Custom API services are optional. Enable them explicitly in the API configuration:
 
-## Key Name Reference
+```yaml
+api:
+  custom_services: true
+  encryption:
+    key: !secret api_encryption_key
+```
 
-Key names can be passed case-insensitively to `key:` or `keys:`:
+When `api:` is absent, or `custom_services` is false, the component still compiles and all ESPHome YAML actions work. When enabled, ESPHome exposes these services (the exact node prefix is assigned by ESPHome; `service_prefix` changes the local `ps2_*` portion):
 
-| Category | Available Key Names |
-|:---|:---|
-| **Letters** | `A` through `Z` |
-| **Numbers** | `0` through `9` |
-| **Modifiers** | `CTRL` (`LCTRL`), `RCTRL`, `SHIFT` (`LSHIFT`), `RSHIFT`, `ALT` (`LALT`), `RALT` (`ALTGR`), `GUI` (`WIN`, `SUPER`, `CMD`), `RGUI`, `MENU` (`APPS`) |
-| **Control** | `ENTER` (`RETURN`), `ESC` (`ESCAPE`), `BACKSPACE` (`BS`), `TAB`, `SPACE` (`SPACEBAR`), `CAPS` (`CAPSLOCK`), `NUM` (`NUMLOCK`), `SCROLL` (`SCROLLLOCK`) |
-| **Navigation** | `UP`, `DOWN`, `LEFT`, `RIGHT`, `INSERT` (`INS`), `DELETE` (`DEL`), `HOME`, `END`, `PAGE_UP` (`PGUP`), `PAGE_DOWN` (`PGDN`) |
-| **Function** | `F1`, `F2`, `F3`, `F4`, `F5`, `F6`, `F7`, `F8`, `F9`, `F10`, `F11`, `F12` |
-| **Keypad** | `KP0` through `KP9`, `KP_ENTER`, `KP_PLUS`, `KP_MINUS`, `KP_MULTIPLY`, `KP_DIVIDE`, `KP_PERIOD` |
-| **Media** | `MUTE`, `VOLUME_UP` (`VOL_UP`), `VOLUME_DOWN` (`VOL_DOWN`), `PLAY` (`PLAY_PAUSE`), `STOP`, `NEXT` (`NEXT_TRACK`), `PREV` (`PREV_TRACK`) |
-| **Power** | `POWER`, `SLEEP`, `WAKE` |
-| **Special** | `PRINTSCREEN` (`PRTSC`), `PAUSE` (`BREAK`) |
-| **Punctuation** | `BACKQUOTE` (``` ` ```), `MINUS` (`-`), `EQUALS` (`=`), `LEFTBRACKET` (`[`), `RIGHTBRACKET` (`]`), `BACKSLASH` (`\`), `SEMICOLON` (`;`), `QUOTE` (`'`), `COMMA` (`,`), `PERIOD` (`.`), `SLASH` (`/`) |
+| Service | Parameter | Description |
+| --- | --- | --- |
+| `esphome.<node>_ps2_type` | `text` | Queue US-ASCII text |
+| `esphome.<node>_ps2_stroke` | `key` | Queue a key stroke |
+| `esphome.<node>_ps2_press` | `key` | Queue a key-down scan code |
+| `esphome.<node>_ps2_release` | `key` | Queue a key-up scan code |
+| `esphome.<node>_ps2_combination` | `keys` | Queue a combination such as `CTRL+ALT+DELETE` |
+| `esphome.<node>_ps2_send_raw` | `hex_bytes` | Queue raw hexadecimal bytes |
+
+For an unencrypted development setup, omit `encryption`; do not use an unencrypted API on an untrusted network. Never commit an API encryption key or Wi-Fi password.
+
+## Key names
+
+Names are case-insensitive. Common aliases are accepted, including `CTRL`/`LCTRL`, `SHIFT`/`LSHIFT`, `WIN`/`GUI`, `DEL`/`DELETE`, and `PGDN`/`PAGE_DOWN`.
+
+| Category | Names |
+| --- | --- |
+| Letters | `A`–`Z` |
+| Digits | `0`–`9` |
+| Modifiers | `CTRL`, `RCTRL`, `SHIFT`, `RSHIFT`, `ALT`, `RALT`/`ALTGR`, `GUI`/`WIN`, `RGUI`, `MENU` |
+| Control | `ENTER`, `ESC`, `BACKSPACE`, `TAB`, `SPACE`, `CAPS`, `NUM`, `SCROLL` |
+| Navigation | `UP`, `DOWN`, `LEFT`, `RIGHT`, `INSERT`, `DELETE`, `HOME`, `END`, `PAGE_UP`, `PAGE_DOWN` |
+| Function | `F1`–`F12` |
+| Keypad | `KP0`–`KP9`, `KP_ENTER`, `KP_PLUS`, `KP_MINUS`, `KP_MULTIPLY`, `KP_DIVIDE`, `KP_PERIOD` |
+| Media/power | `MUTE`, `VOLUME_UP`, `VOLUME_DOWN`, `PLAY_PAUSE`, `STOP`, `NEXT`, `PREV`, `POWER`, `SLEEP`, `WAKE` |
+| Special | `PRINTSCREEN`, `PAUSE` |
+| Punctuation | ``BACKQUOTE``, `MINUS`, `EQUALS`, `LEFTBRACKET`, `RIGHTBRACKET`, `BACKSLASH`, `SEMICOLON`, `QUOTE`, `COMMA`, `PERIOD`, `SLASH` |
+
+`print()` supports printable US-ASCII characters, plus tab, newline, carriage return, and backspace. Unsupported bytes are skipped and counted in the log.
+
+## Protocol notes and limitations
+
+The component implements the command/status subset needed by common PC BIOS and operating-system keyboard controllers. It does not implement typematic key repeat, keyboard-controller scan-code sets other than Set 2, dynamic keyboard layouts, or Unicode composition. The host may reject unsupported media/power sequences; use `send_raw` only when the receiver's protocol is known.
+
+All bus timing is performed in the component task. The output queue protects the ESPHome loop from clocking delays, but it cannot guarantee delivery while a host continuously holds the bus or while the host has disabled reporting.
+
+## Development and verification
+
+Run the native parser/scancode tests and ESPHome schema check with:
+
+```sh
+./script/test
+```
+
+The script requires a C++17 compiler and the `esphome` command. A complete firmware check is:
+
+```sh
+esphome config example.yaml
+esphome compile example.yaml
+```
+
+For release qualification, test both `esp-idf` and `arduino`, and use a logic analyzer or protocol-aware test harness to verify:
+
+1. The power-on `0xAA` response and reset `0xFF` transcript.
+2. Odd parity and stop bits on device-to-host frames.
+3. Host LED commands and ACK/resend behavior.
+4. Make/break sequences for normal, extended, Print Screen, and Pause keys.
+5. Cold boot in both a legacy BIOS and a UEFI environment.
+6. Bus behavior when the host holds CLK low, sends malformed frames, or disables reporting.
+
+## License
+
+Apache License 2.0. See [`LICENSE`](LICENSE).

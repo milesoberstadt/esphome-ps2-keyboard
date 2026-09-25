@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CXX_BIN="${CXX:-c++}"
+TMP_ROOT="${TMPDIR:-/tmp/opencode}"
+mkdir -p "$TMP_ROOT"
+TEST_BIN="$(mktemp "$TMP_ROOT/ps2-scancodes.XXXXXX")"
+trap 'rm -f "$TEST_BIN"' EXIT
+
+"$CXX_BIN" \
+  -std=c++17 \
+  -Wall \
+  -Wextra \
+  -Werror \
+  -I"$ROOT_DIR/components" \
+  "$ROOT_DIR/tests/scancodes_test.cpp" \
+  -o "$TEST_BIN"
+"$TEST_BIN"
+
+python3 -m compileall -q "$ROOT_DIR/components/ps2_keyboard"
+(
+  cd "$ROOT_DIR"
+  esphome config example.yaml >/dev/null
+  INVALID_LOG="$TMP_ROOT/ps2-invalid-pin.log"
+  if esphome config tests/invalid-inverted-pin.yaml >"$INVALID_LOG" 2>&1; then
+    echo "inverted PS/2 pin was accepted" >&2
+    exit 1
+  fi
+  if ! grep -q "cannot use inverted" "$INVALID_LOG"; then
+    cat "$INVALID_LOG" >&2
+    echo "invalid-pin fixture failed for an unexpected reason" >&2
+    exit 1
+  fi
+)
+
+echo "All PS/2 component tests passed"

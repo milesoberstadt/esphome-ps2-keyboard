@@ -1,10 +1,11 @@
 substitutions:
   name: esphome-ps2-keyboard
-  friendly_name: "PS/2 Keyboard Emulator"
+  friendly_name: "PS2 Keyboard Emulator"
 
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
+  min_version: 2026.9.0
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -18,10 +19,12 @@ external_components:
       type: local
       path: components
 
-# Enable Home Assistant native API and services
+# Enable Home Assistant native API and the optional PS/2 services
 api:
-  encryption:
-    key: "HmLlD855vPwJWw7ZjYN4hm0703BaMDsvGjZwci3229g="
+  custom_services: true
+  # For a deployed node, enable encryption and keep the key in secrets.yaml:
+  # encryption:
+  #   key: !secret api_encryption_key
 
 # Enable OTA updates
 ota:
@@ -33,7 +36,7 @@ wifi:
   password: "YOUR_WIFI_PASSWORD"
   ap:
     ssid: "PS2-Keyboard-Fallback"
-    password: "fallbackpassword"
+    password: "change-me-fallback-password"
 
 captive_portal:
 
@@ -48,9 +51,11 @@ ps2_keyboard:
   clk_pin: GPIO4
   data_pin: GPIO5
 
-  # Background FreeRTOS task priority (default: 10) and core affinity (default: 1)
+  # Background FreeRTOS task priority (default: 10); -1 means no core affinity
   task_priority: 10
-  task_core: 1
+  task_core: -1
+  # Use a unique prefix when configuring multiple instances with API services.
+  service_prefix: ps2
 
   # Optional Binary Sensors to reflect Host keyboard LED indicators
   caps_lock:

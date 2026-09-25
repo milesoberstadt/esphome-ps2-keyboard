@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run native and schema tests
+        run: ./script/test
+      - name: Compile ESP-IDF example
+        run: esphome compile example.yaml
+      - name: Compile Arduino fixture
+        run: esphome compile tests/arduino.yaml

@@ -62,6 +62,15 @@ enum class KeyType : uint8_t {
   SPECIAL_PAUSE         // Make: [0xE1, 0x14, 0x77, 0xE1, 0xF0, 0x14, 0xF0, 0x77], Break: none
 };
 
+inline uint8_t ps2_odd_parity(uint8_t value) {
+  uint8_t parity = 1;
+  while (value != 0) {
+    parity ^= value & 1;
+    value >>= 1;
+  }
+  return parity;
+}
+
 struct KeyEntry {
   Key key;
   KeyType type;
@@ -69,7 +78,7 @@ struct KeyEntry {
 };
 
 // Scan Code Set 2 Table
-static const KeyEntry KEY_MAP[] = {
+inline constexpr KeyEntry KEY_MAP[] = {
     // Letters
     {Key::KEY_A, KeyType::NORMAL, 0x1C},
     {Key::KEY_B, KeyType::NORMAL, 0x32},
@@ -201,14 +210,16 @@ static const KeyEntry KEY_MAP[] = {
     {Key::KEY_VOLUME_DOWN, KeyType::EXTENDED, 0x21},
 };
 
-static inline const KeyEntry *find_key_entry(Key key) {
+inline const KeyEntry *find_key_entry(Key key) {
   for (const auto &entry : KEY_MAP) {
-    if (entry.key == key) return &entry;
+    if (entry.key == key)
+      return &entry;
   }
   return nullptr;
 }
 
 inline bool get_make_code(Key key, uint8_t *out_data, uint8_t &out_len) {
+  out_len = 0;
   const KeyEntry *entry = find_key_entry(key);
   if (!entry) {
     out_len = 0;
@@ -249,6 +260,7 @@ inline bool get_make_code(Key key, uint8_t *out_data, uint8_t &out_len) {
 }
 
 inline bool get_break_code(Key key, uint8_t *out_data, uint8_t &out_len) {
+  out_len = 0;
   const KeyEntry *entry = find_key_entry(key);
   if (!entry) {
     out_len = 0;
@@ -310,7 +322,7 @@ inline Key key_from_string(const std::string &raw_str) {
     if (c == ' ') return Key::KEY_SPACE;
     if (c == '`') return Key::KEY_BACKQUOTE;
     if (c == '-') return Key::KEY_MINUS;
-    if (c == '=') return Key::KEY_EQUALS;
+    if (c == '=' || c == '+') return Key::KEY_EQUALS;
     if (c == '[') return Key::KEY_LEFTBRACKET;
     if (c == ']') return Key::KEY_RIGHTBRACKET;
     if (c == '\\') return Key::KEY_BACKSLASH;
@@ -320,6 +332,19 @@ inline Key key_from_string(const std::string &raw_str) {
     if (c == '.') return Key::KEY_PERIOD;
     if (c == '/') return Key::KEY_SLASH;
   }
+
+  // Long punctuation names used by the documented key reference
+  if (s == "BACKQUOTE") return Key::KEY_BACKQUOTE;
+  if (s == "MINUS") return Key::KEY_MINUS;
+  if (s == "EQUALS" || s == "PLUS") return Key::KEY_EQUALS;
+  if (s == "LEFTBRACKET" || s == "LEFT_BRACKET") return Key::KEY_LEFTBRACKET;
+  if (s == "RIGHTBRACKET" || s == "RIGHT_BRACKET") return Key::KEY_RIGHTBRACKET;
+  if (s == "BACKSLASH") return Key::KEY_BACKSLASH;
+  if (s == "SEMICOLON") return Key::KEY_SEMICOLON;
+  if (s == "QUOTE" || s == "APOSTROPHE") return Key::KEY_QUOTE;
+  if (s == "COMMA") return Key::KEY_COMMA;
+  if (s == "PERIOD" || s == "DOT") return Key::KEY_PERIOD;
+  if (s == "SLASH") return Key::KEY_SLASH;
 
   // Common aliases & function keys
   if (s == "ENTER" || s == "RETURN") return Key::KEY_ENTER;
@@ -352,7 +377,7 @@ inline Key key_from_string(const std::string &raw_str) {
   if (s == "HOME") return Key::KEY_HOME;
   if (s == "END") return Key::KEY_END;
   if (s == "PAGE_UP" || s == "PAGEUP" || s == "PGUP") return Key::KEY_PAGE_UP;
-  if (s == "PAGE_DOWN" || s == "PAGEDOWN" || s == "PGDN") return Key::KEY_PAGE_DOWN;
+  if (s == "PAGE_DOWN" || s == "PAGEDOWN" || s == "PGDOWN" || s == "PGDN") return Key::KEY_PAGE_DOWN;
 
   // Function keys F1 - F12
   if (s == "F1") return Key::KEY_F1;
@@ -469,48 +494,102 @@ inline bool ascii_to_key(char c, Key &key, bool &shift) {
   }
 }
 
+inline bool parse_key_combination(const std::string &str, std::vector<Key> &result) {
+  result.clear();
+  const std::string normalized = trim_and_upper(str);
+  if (normalized.empty())
+    return false;
+
+  size_t start = 0;
+  while (start <= normalized.size()) {
+    const size_t separator = normalized.find('+', start);
+    const size_t length = (separator == std::string::npos ? normalized.size() : separator) - start;
+    std::string token = normalized.substr(start, length);
+
+    // A plus sign is also the name of the physical US-layout key. A terminal
+    // separator (for example "CTRL++") therefore represents CTRL plus '+'.
+    if (token.empty()) {
+      if (separator != normalized.size() - 1)
+        return false;
+      result.push_back(Key::KEY_EQUALS);
+      return true;
+    }
+
+    const Key key = key_from_string(token);
+    if (key == Key::KEY_NONE) {
+      result.clear();
+      return false;
+    }
+    result.push_back(key);
+
+    if (separator == std::string::npos)
+      break;
+    start = separator + 1;
+  }
+  return true;
+}
+
+// Compatibility helper for callers that only need the parsed key vector.
 inline std::vector<Key> parse_key_combination(const std::string &str) {
   std::vector<Key> result;
-  std::string token;
-  for (size_t i = 0; i <= str.size(); i++) {
-    char c = (i < str.size()) ? str[i] : '+';
-    if (c == '+' || c == '-') {
-      if (!token.empty()) {
-        Key k = key_from_string(token);
-        if (k != Key::KEY_NONE) {
-          result.push_back(k);
-        }
-        token.clear();
-      }
-    } else {
-      token += c;
-    }
-  }
+  parse_key_combination(str, result);
   return result;
+}
+
+inline int hex_digit_value(char c) {
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  return -1;
+}
+
+inline bool parse_hex_token(const std::string &token, uint8_t &value) {
+  size_t start = 0;
+  if (token.size() >= 2 && token[0] == '0' && (token[1] == 'x' || token[1] == 'X'))
+    start = 2;
+  if (start == token.size())
+    return false;
+
+  unsigned int parsed = 0;
+  for (size_t i = start; i < token.size(); i++) {
+    const int digit = hex_digit_value(token[i]);
+    if (digit < 0)
+      return false;
+    parsed = (parsed << 4) | static_cast<unsigned int>(digit);
+    if (parsed > 0xFF)
+      return false;
+  }
+  value = static_cast<uint8_t>(parsed);
+  return true;
 }
 
 inline std::vector<uint8_t> parse_hex_string(const std::string &hex_str) {
   std::vector<uint8_t> result;
   std::string token;
   auto flush_token = [&]() {
-    if (!token.empty()) {
-      char *end = nullptr;
-      unsigned long val = std::strtoul(token.c_str(), &end, 16);
-      if (end != token.c_str()) {
-        result.push_back(static_cast<uint8_t>(val & 0xFF));
-      }
-      token.clear();
-    }
+    if (token.empty())
+      return true;
+    uint8_t value;
+    if (!parse_hex_token(token, value))
+      return false;
+    result.push_back(value);
+    token.clear();
+    return true;
   };
 
   for (char c : hex_str) {
-    if (std::isspace((unsigned char)c) || c == ',' || c == ';') {
-      flush_token();
+    if (std::isspace(static_cast<unsigned char>(c)) || c == ',' || c == ';') {
+      if (!flush_token())
+        return {};
     } else {
       token += c;
     }
   }
-  flush_token();
+  if (!flush_token())
+    return {};
   return result;
 }
 
